@@ -1,5 +1,6 @@
 #include "ui/CardController.h"
 #include "ui/PaddleCard.h"
+#include "ui/PomodoroCard.h"
 #include <algorithm>
 
 QueueHandle_t CardController::uiQueue = nullptr;
@@ -8,207 +9,221 @@ QueueHandle_t CardController::uiQueue = nullptr;
 std::function<void(std::function<void()>, bool)> globalUIDispatch;
 
 CardController::CardController(
-    lv_obj_t* screen,
+    lv_obj_t *screen,
     uint16_t screenWidth,
     uint16_t screenHeight,
-    ConfigManager& configManager,
-    WiFiInterface& wifiInterface,
-    PostHogClient& posthogClient,
-    EventQueue& eventQueue
-) : screen(screen),
-    screenWidth(screenWidth),
-    screenHeight(screenHeight),
-    configManager(configManager),
-    wifiInterface(wifiInterface),
-    posthogClient(posthogClient),
-    eventQueue(eventQueue),
-    cardStack(nullptr),
-    provisioningCard(nullptr),
-    animationCard(nullptr),
-    displayInterface(nullptr),
-    dynamicCards()
+    ConfigManager &configManager,
+    WiFiInterface &wifiInterface,
+    PostHogClient &posthogClient,
+    EventQueue &eventQueue) : screen(screen),
+                              screenWidth(screenWidth),
+                              screenHeight(screenHeight),
+                              configManager(configManager),
+                              wifiInterface(wifiInterface),
+                              posthogClient(posthogClient),
+                              eventQueue(eventQueue),
+                              cardStack(nullptr),
+                              provisioningCard(nullptr),
+                              animationCard(nullptr),
+                              displayInterface(nullptr),
+                              dynamicCards()
 {
 }
 
-CardController::~CardController() {
+CardController::~CardController()
+{
     // Clean up any allocated resources
     delete cardStack;
     cardStack = nullptr;
-    
+
     delete provisioningCard;
     provisioningCard = nullptr;
-    
+
     delete animationCard;
     animationCard = nullptr;
-    
+
     // Use mutex if available before cleaning up dynamic cards
-    if (displayInterface && displayInterface->getMutexPtr()) {
+    if (displayInterface && displayInterface->getMutexPtr())
+    {
         xSemaphoreTake(*(displayInterface->getMutexPtr()), portMAX_DELAY);
     }
-    
+
     // Clean up all dynamic cards using unified system
-    for (auto& [cardType, cards] : dynamicCards) {
-        for (auto& cardInstance : cards) {
+    for (auto &[cardType, cards] : dynamicCards)
+    {
+        for (auto &cardInstance : cards)
+        {
             delete cardInstance.handler;
         }
     }
     dynamicCards.clear();
-    
+
     // Release mutex if we took it
-    if (displayInterface && displayInterface->getMutexPtr()) {
+    if (displayInterface && displayInterface->getMutexPtr())
+    {
         xSemaphoreGive(*(displayInterface->getMutexPtr()));
     }
 }
 
-void CardController::initialize(DisplayInterface* display) {
+void CardController::initialize(DisplayInterface *display)
+{
     // Set the display interface first
     setDisplayInterface(display);
-    
+
     // Initialize UI queue for thread-safe operations
     initUIQueue();
-    
+
     // Initialize card type registrations
     initializeCardTypes();
-    
+
     // Create card navigation stack
     cardStack = new CardNavigationStack(screen, screenWidth, screenHeight);
-    
+
     // Create provision UI (always present, not configurable)
     provisioningCard = new ProvisioningCard(
-        screen, 
-        wifiInterface, 
-        screenWidth, 
-        screenHeight
-    );
-    
+        screen,
+        wifiInterface,
+        screenWidth,
+        screenHeight);
+
     // Add provisioning card to navigation stack
     cardStack->addCard(provisioningCard->getCard());
-    
+
     // Load current card configuration and create cards
     currentCardConfigs = configManager.getCardConfigs();
-    
+
     // Don't create any default cards when no configuration exists
     // Only the provisioning card will be shown
-    
+
     // If we have card configurations now, reconcile them
-    if (!currentCardConfigs.empty()) {
+    if (!currentCardConfigs.empty())
+    {
         reconcileCards(currentCardConfigs);
     }
-    
+
     // Connect WiFi manager to UI
     wifiInterface.setUI(provisioningCard);
-    
-    
+
     // Subscribe to card configuration changes
-    eventQueue.subscribe([this](const Event& event) {
+    eventQueue.subscribe([this](const Event &event)
+                         {
         if (event.type == EventType::CARD_CONFIG_CHANGED) {
             handleCardConfigChanged();
         } else if (event.type == EventType::CARD_TITLE_UPDATED) {
             handleCardTitleUpdated(event);
-        }
-    });
-    
+        } });
+
     // Subscribe to WiFi events
-    eventQueue.subscribe([this](const Event& event) {
+    eventQueue.subscribe([this](const Event &event)
+                         {
         if (event.type == EventType::WIFI_CONNECTING || 
             event.type == EventType::WIFI_CONNECTED ||
             event.type == EventType::WIFI_CONNECTION_FAILED ||
             event.type == EventType::WIFI_AP_STARTED) {
             handleWiFiEvent(event);
-        }
-    });
+        } });
 }
 
-void CardController::setDisplayInterface(DisplayInterface* display) {
+void CardController::setDisplayInterface(DisplayInterface *display)
+{
     displayInterface = display;
-    
+
     // Set the mutex for the card stack if we have a display interface
-    if (cardStack && displayInterface) {
+    if (cardStack && displayInterface)
+    {
         cardStack->setMutex(displayInterface->getMutexPtr());
     }
 }
 
 // Create an animation card with the walking sprites
-void CardController::createAnimationCard() {
-    if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY)) {
+void CardController::createAnimationCard()
+{
+    if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY))
+    {
         return;
     }
-    
+
     // Create new animation card
     animationCard = new FriendCard(
-        screen
-    );
-    
+        screen);
+
     // Add to navigation stack
     cardStack->addCard(animationCard->getCard());
-    
+
     // Register the animation card as an input handler
     cardStack->registerInputHandler(animationCard->getCard(), animationCard);
-    
+
     displayInterface->giveMutex();
 }
 
-void CardController::createHelloWorldCard() {
-    if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY)) {
+void CardController::createHelloWorldCard()
+{
+    if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY))
+    {
         return;
     }
-    
+
     // Create new hello world card
-    HelloWorldCard* helloCard = new HelloWorldCard(screen);
-    
-    if (helloCard && helloCard->getCard()) {
+    HelloWorldCard *helloCard = new HelloWorldCard(screen);
+
+    if (helloCard && helloCard->getCard())
+    {
         // Add to navigation stack
         cardStack->addCard(helloCard->getCard());
-        
+
         // Register as an input handler
         cardStack->registerInputHandler(helloCard->getCard(), helloCard);
     }
-    
+
     displayInterface->giveMutex();
 }
-
-
 
 // Handle WiFi events
-void CardController::handleWiFiEvent(const Event& event) {
-    if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY)) {
+void CardController::handleWiFiEvent(const Event &event)
+{
+    if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY))
+    {
         return;
     }
-    
-    switch (event.type) {
-        case EventType::WIFI_CONNECTING:
-            provisioningCard->updateConnectionStatus("Connecting to WiFi...");
-            break;
-            
-        case EventType::WIFI_CONNECTED:
-            provisioningCard->updateConnectionStatus("Connected");
-            provisioningCard->showWiFiStatus();
-            break;
-            
-        case EventType::WIFI_CONNECTION_FAILED:
-            provisioningCard->updateConnectionStatus("Connection failed");
-            break;
-            
-        case EventType::WIFI_AP_STARTED:
-            provisioningCard->showQRCode();
-            break;
-            
-        default:
-            break;
+
+    switch (event.type)
+    {
+    case EventType::WIFI_CONNECTING:
+        provisioningCard->updateConnectionStatus("Connecting to WiFi...");
+        break;
+
+    case EventType::WIFI_CONNECTED:
+        provisioningCard->updateConnectionStatus("Connected");
+        provisioningCard->showWiFiStatus();
+        break;
+
+    case EventType::WIFI_CONNECTION_FAILED:
+        provisioningCard->updateConnectionStatus("Connection failed");
+        break;
+
+    case EventType::WIFI_AP_STARTED:
+        provisioningCard->showQRCode();
+        break;
+
+    default:
+        break;
     }
-    
+
     displayInterface->giveMutex();
 }
 
-std::vector<CardDefinition> CardController::getCardDefinitions() const {
+std::vector<CardDefinition> CardController::getCardDefinitions() const
+{
     return registeredCardTypes;
 }
 
-void CardController::registerCardType(const CardDefinition& definition) {
+void CardController::registerCardType(const CardDefinition &definition)
+{
     registeredCardTypes.push_back(definition);
 }
 
-void CardController::initializeCardTypes() {
+void CardController::initializeCardTypes()
+{
     // Register INSIGHT card type
     CardDefinition insightDef;
     insightDef.type = CardType::INSIGHT;
@@ -217,38 +232,39 @@ void CardController::initializeCardTypes() {
     insightDef.needsConfigInput = true;
     insightDef.configInputLabel = "Insight ID";
     insightDef.uiDescription = "Insight cards let you keep an eye on PostHog data";
-    insightDef.factory = [this](const String& configValue) -> lv_obj_t* {
+    insightDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
         // Create new insight card using the insight ID
-        InsightCard* newCard = new InsightCard(
+        InsightCard *newCard = new InsightCard(
             screen,
             configManager,
             eventQueue,
             configValue,
             screenWidth,
-            screenHeight
-        );
-        
-        if (newCard && newCard->getCard()) {
+            screenHeight);
+
+        if (newCard && newCard->getCard())
+        {
             // Add to unified tracking system
             CardInstance instance{newCard, newCard->getCard()};
             dynamicCards[CardType::INSIGHT].push_back(instance);
-            
+
             // Register as input handler
             cardStack->registerInputHandler(newCard->getCard(), newCard);
-            
+
             // Request data for this insight immediately
             posthogClient.requestInsightData(configValue);
             Serial.printf("Requested insight data for: %s\n", configValue.c_str());
-            
+
             return newCard->getCard();
         }
-        
+
         delete newCard;
         return nullptr;
     };
     registerCardType(insightDef);
-    
-    // Register FRIEND card type  
+
+    // Register FRIEND card type
     CardDefinition friendDef;
     friendDef.type = CardType::FRIEND;
     friendDef.name = "Friend card";
@@ -256,28 +272,30 @@ void CardController::initializeCardTypes() {
     friendDef.needsConfigInput = false;
     friendDef.configInputLabel = "";
     friendDef.uiDescription = "Get reassurance from Max the hedgehog";
-    friendDef.factory = [this](const String& configValue) -> lv_obj_t* {
+    friendDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
         // Create new friend card (ignore configValue for now)
-        FriendCard* newCard = new FriendCard(screen);
-        
-        if (newCard && newCard->getCard()) {
+        FriendCard *newCard = new FriendCard(screen);
+
+        if (newCard && newCard->getCard())
+        {
             // Add to unified tracking system
             CardInstance instance{newCard, newCard->getCard()};
             dynamicCards[CardType::FRIEND].push_back(instance);
-            
+
             // Keep legacy pointer for backwards compatibility
             animationCard = newCard;
-            
+
             // Register as input handler
             cardStack->registerInputHandler(newCard->getCard(), newCard);
             return newCard->getCard();
         }
-        
+
         delete newCard;
         return nullptr;
     };
     registerCardType(friendDef);
-    
+
     // Register HELLO_WORLD card type
     CardDefinition helloDef;
     helloDef.type = CardType::HELLO_WORLD;
@@ -286,129 +304,168 @@ void CardController::initializeCardTypes() {
     helloDef.needsConfigInput = false;
     helloDef.configInputLabel = "";
     helloDef.uiDescription = "A simple greeting card";
-    helloDef.factory = [this](const String& configValue) -> lv_obj_t* {
-        HelloWorldCard* newCard = new HelloWorldCard(screen);
-        
-        if (newCard && newCard->getCard()) {
+    helloDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
+        HelloWorldCard *newCard = new HelloWorldCard(screen);
+
+        if (newCard && newCard->getCard())
+        {
             // Add to unified tracking system
             CardInstance instance{newCard, newCard->getCard()};
             dynamicCards[CardType::HELLO_WORLD].push_back(instance);
-            
+
             // Register as input handler
             cardStack->registerInputHandler(newCard->getCard(), newCard);
             return newCard->getCard();
         }
-        
+
         delete newCard;
         return nullptr;
     };
     registerCardType(helloDef);
-    
+
     // Register FLAPPY_HOG card type
     CardDefinition flappyDef;
     flappyDef.type = CardType::FLAPPY_HOG;
     flappyDef.name = "Flappy Hog";
-    flappyDef.allowMultiple = false;  // Only one game instance at a time
+    flappyDef.allowMultiple = false; // Only one game instance at a time
     flappyDef.needsConfigInput = false;
     flappyDef.configInputLabel = "";
     flappyDef.uiDescription = "One button. Endless frustration. Infinite glory.";
-    flappyDef.factory = [this](const String& configValue) -> lv_obj_t* {
-        FlappyHogCard* newCard = new FlappyHogCard(screen);
-        
-        if (newCard && newCard->getCard()) {
+    flappyDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
+        FlappyHogCard *newCard = new FlappyHogCard(screen);
+
+        if (newCard && newCard->getCard())
+        {
             // Add to unified tracking system
             CardInstance instance{newCard, newCard->getCard()};
             dynamicCards[CardType::FLAPPY_HOG].push_back(instance);
-            
+
             // Register as input handler
             cardStack->registerInputHandler(newCard->getCard(), newCard);
             return newCard->getCard();
         }
-        
+
         delete newCard;
         return nullptr;
     };
     registerCardType(flappyDef);
-    
+
     // Register QUESTION card type
     CardDefinition questionDef;
     questionDef.type = CardType::QUESTION;
     questionDef.name = "Question Card";
-    questionDef.allowMultiple = false;  // Only one question card at a time
+    questionDef.allowMultiple = false; // Only one question card at a time
     questionDef.needsConfigInput = false;
     questionDef.configInputLabel = "";
     questionDef.uiDescription = "Break the ice with your coworkers.";
-    questionDef.factory = [this](const String& configValue) -> lv_obj_t* {
-        QuestionCard* newCard = new QuestionCard(screen);
-        
-        if (newCard && newCard->getCard()) {
+    questionDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
+        QuestionCard *newCard = new QuestionCard(screen);
+
+        if (newCard && newCard->getCard())
+        {
             // Add to unified tracking system
             CardInstance instance{newCard, newCard->getCard()};
             dynamicCards[CardType::QUESTION].push_back(instance);
-            
+
             // Register as input handler
             cardStack->registerInputHandler(newCard->getCard(), newCard);
             return newCard->getCard();
         }
-        
+
         delete newCard;
         return nullptr;
     };
     registerCardType(questionDef);
-    
+
     // Register PADDLE card type
     CardDefinition paddleDef;
     paddleDef.type = CardType::PADDLE;
     paddleDef.name = "Paddle";
-    paddleDef.allowMultiple = false;  // Only one paddle game at a time
+    paddleDef.allowMultiple = false; // Only one paddle game at a time
     paddleDef.needsConfigInput = false;
     paddleDef.configInputLabel = "";
     paddleDef.uiDescription = "Classic Paddle game - beat the AI!";
-    paddleDef.factory = [this](const String& configValue) -> lv_obj_t* {
-        PaddleCard* newCard = new PaddleCard(screen);
-        
-        if (newCard && newCard->getCard()) {
+    paddleDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
+        PaddleCard *newCard = new PaddleCard(screen);
+
+        if (newCard && newCard->getCard())
+        {
             // Add to unified tracking system
             CardInstance instance{newCard, newCard->getCard()};
             dynamicCards[CardType::PADDLE].push_back(instance);
-            
+
             // Register as input handler
             cardStack->registerInputHandler(newCard->getCard(), newCard);
             return newCard->getCard();
         }
-        
+
         delete newCard;
         return nullptr;
     };
     registerCardType(paddleDef);
+
+    // Register POMODORO card type
+    CardDefinition pomodoroDef;
+    pomodoroDef.type = CardType::POMODORO;
+    pomodoroDef.name = "Pomodoro";
+    pomodoroDef.allowMultiple = false; // Only one paddle game at a time
+    pomodoroDef.needsConfigInput = false;
+    pomodoroDef.configInputLabel = "";
+    pomodoroDef.uiDescription = "Classic pomodoro clock!";
+    pomodoroDef.factory = [this](const String &configValue) -> lv_obj_t *
+    {
+        PomodoroCard *newCard = new PomodoroCard(screen);
+
+        if (newCard && newCard->getCard())
+        {
+            // Add to unified tracking system
+            CardInstance instance{newCard, newCard->getCard()};
+            dynamicCards[CardType::PADDLE].push_back(instance);
+
+            // Register as input handler
+            cardStack->registerInputHandler(newCard->getCard(), newCard);
+            return newCard->getCard();
+        }
+
+        delete newCard;
+        return nullptr;
+    };
+    registerCardType(pomodoroDef);
 }
 
-void CardController::handleCardConfigChanged() {
+void CardController::handleCardConfigChanged()
+{
     // Load new configuration from storage
     std::vector<CardConfig> newConfigs = configManager.getCardConfigs();
     currentCardConfigs = newConfigs;
-    
+
     // Perform reconciliation
     reconcileCards(newConfigs);
-    
 }
 
-void CardController::reconcileCards(const std::vector<CardConfig>& newConfigs) {
-    if (reconcileInProgress) {
+void CardController::reconcileCards(const std::vector<CardConfig> &newConfigs)
+{
+    if (reconcileInProgress)
+    {
         return;
     }
-    
-    
+
     // Track the number of cards before reconciliation
     size_t oldCardCount = 0;
-    for (const auto& [cardType, cards] : dynamicCards) {
+    for (const auto &[cardType, cards] : dynamicCards)
+    {
         oldCardCount += cards.size();
     }
-    
+
     reconcileInProgress = true;
-    
+
     // Dispatch the entire reconciliation to the LVGL task to ensure thread safety
-    dispatchToLVGLTask([this, newConfigs, oldCardCount]() {
+    dispatchToLVGLTask([this, newConfigs, oldCardCount]()
+                       {
         if (!displayInterface || !displayInterface->takeMutex(portMAX_DELAY)) {
             reconcileInProgress = false;  // Clear flag on failure
             return;
@@ -506,82 +563,103 @@ void CardController::reconcileCards(const std::vector<CardConfig>& newConfigs) {
         // Clear the in-progress flag
         reconcileInProgress = false;
         
-        displayInterface->giveMutex();
-    }, true); // Use to_front=true for immediate processing
+        displayInterface->giveMutex(); }, true); // Use to_front=true for immediate processing
 }
 
-void CardController::initUIQueue() {
-    if (uiQueue == nullptr) {
-        uiQueue = xQueueCreate(20, sizeof(UICallback*));
-        if (uiQueue == nullptr) {
+void CardController::initUIQueue()
+{
+    if (uiQueue == nullptr)
+    {
+        uiQueue = xQueueCreate(20, sizeof(UICallback *));
+        if (uiQueue == nullptr)
+        {
             Serial.println("[UI-CRITICAL] Failed to create UI task queue!");
-        } else {
+        }
+        else
+        {
             // Set the global dispatch function to point to our method
-            globalUIDispatch = [this](std::function<void()> func, bool to_front) {
+            globalUIDispatch = [this](std::function<void()> func, bool to_front)
+            {
                 this->dispatchToLVGLTask(std::move(func), to_front);
             };
         }
     }
 }
 
-void CardController::processUIQueue() {
-    if (uiQueue == nullptr) return;
+void CardController::processUIQueue()
+{
+    if (uiQueue == nullptr)
+        return;
 
-    UICallback* callback_ptr = nullptr;
-    while (xQueueReceive(uiQueue, &callback_ptr, 0) == pdTRUE) {
-        if (callback_ptr) {
+    UICallback *callback_ptr = nullptr;
+    while (xQueueReceive(uiQueue, &callback_ptr, 0) == pdTRUE)
+    {
+        if (callback_ptr)
+        {
             callback_ptr->execute();
             delete callback_ptr;
         }
     }
-    
+
     // Update active card (for games and other interactive cards)
-    if (cardStack) {
+    if (cardStack)
+    {
         cardStack->updateActiveCard();
     }
 }
 
-void CardController::dispatchToLVGLTask(std::function<void()> update_func, bool to_front) {
-    if (uiQueue == nullptr) {
+void CardController::dispatchToLVGLTask(std::function<void()> update_func, bool to_front)
+{
+    if (uiQueue == nullptr)
+    {
         Serial.println("[UI-ERROR] UI Queue not initialized, cannot dispatch UI update.");
         return;
     }
 
-    UICallback* callback = new UICallback(std::move(update_func));
-    if (!callback) {
+    UICallback *callback = new UICallback(std::move(update_func));
+    if (!callback)
+    {
         Serial.println("[UI-CRITICAL] Failed to allocate UICallback for dispatch!");
         return;
     }
 
     BaseType_t queue_send_result;
-    if (to_front) {
-        queue_send_result = xQueueSendToFront(uiQueue, &callback, (TickType_t)0); 
-    } else {
+    if (to_front)
+    {
+        queue_send_result = xQueueSendToFront(uiQueue, &callback, (TickType_t)0);
+    }
+    else
+    {
         queue_send_result = xQueueSend(uiQueue, &callback, (TickType_t)0);
     }
 
-    if (queue_send_result != pdTRUE) {
-        Serial.printf("[UI-WARN] UI queue full/error (send_to_front: %d), update discarded. Core: %d\n", 
+    if (queue_send_result != pdTRUE)
+    {
+        Serial.printf("[UI-WARN] UI queue full/error (send_to_front: %d), update discarded. Core: %d\n",
                       to_front, xPortGetCoreID());
         delete callback;
     }
 }
 
-void CardController::handleCardTitleUpdated(const Event& event) {
+void CardController::handleCardTitleUpdated(const Event &event)
+{
     // Find and update the card configuration with the new title
-    for (auto& cardConfig : currentCardConfigs) {
-        if (cardConfig.type == CardType::INSIGHT && cardConfig.config == event.insightId) {
+    for (auto &cardConfig : currentCardConfigs)
+    {
+        if (cardConfig.type == CardType::INSIGHT && cardConfig.config == event.insightId)
+        {
             // Update the name with the new title
-            if (cardConfig.name != event.title) {
+            if (cardConfig.name != event.title)
+            {
                 cardConfig.name = event.title;
-                
+
                 // Save the updated configuration to persistent storage
                 configManager.saveCardConfigs(currentCardConfigs);
-                
-                Serial.printf("Updated card title for insight %s to: %s\n", 
-                             event.insightId.c_str(), event.title.c_str());
+
+                Serial.printf("Updated card title for insight %s to: %s\n",
+                              event.insightId.c_str(), event.title.c_str());
             }
             break;
         }
     }
-} 
+}
